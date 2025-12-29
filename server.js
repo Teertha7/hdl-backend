@@ -2,18 +2,14 @@ const express = require('express');
 const { exec, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const PORT = process.env.PORT || 3000;
 const cors = require("cors");
 
+const app = express(); // ✅ app created FIRST
+const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
-  console.log(`Server running on ${PORT}`);
-});
-
-const app = express();
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
 app.use(cors());
+app.use(express.static(path.join(__dirname, 'public')));
 
 app.post('/run', (req, res) => {
     const { design, testbench } = req.body;
@@ -41,7 +37,7 @@ app.post('/run', (req, res) => {
 
     // 3. Compile and Run using Icarus Verilog
     const cmd = `iverilog -o "${vvpPath}" "${designPath}" "${tbPath}" && vvp "${vvpPath}"`;
-    
+
     exec(cmd, { timeout: 5000 }, (error, stdout, stderr) => {
         let log = stdout + (stderr || "");
         let vcdData = null;
@@ -58,6 +54,7 @@ app.post('/run', (req, res) => {
     });
 });
 
+// ✅ listen ONLY ONCE, at the very end
 app.listen(PORT, () => {
-  console.log(`Server running on ${PORT}`);
+    console.log(`Server running on ${PORT}`);
 });
