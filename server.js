@@ -4,57 +4,55 @@ const fs = require('fs');
 const path = require('path');
 const cors = require("cors");
 
-const app = express(); // ✅ app created FIRST
+const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
-app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
+app.use(cors());
 
 app.post('/run', (req, res) => {
     const { design, testbench } = req.body;
 
-    // 1. Kill any existing simulation processes to prevent file locking
+    // 1. Kill previous hanging processes
     try {
         if (process.platform === "win32") {
             execSync('taskkill /F /IM vvp.exe /T 2>NUL || exit 0');
         } else {
             execSync('killall -9 vvp 2>/dev/null || true');
         }
-    } catch (e) { /* No process found, ignore */ }
+    } catch (e) {}
+
+    // 2. Clean up ALL old VCD files in the directory
+    const files = fs.readdirSync(__dirname);
+    files.forEach(file => {
+        if (file.endsWith('.vcd')) fs.unlinkSync(path.join(__dirname, file));
+    });
 
     const designPath = path.join(__dirname, 'design.v');
     const tbPath = path.join(__dirname, 'testbench.v');
-    const vcdPath = path.join(__dirname, 'dump.vcd');
     const vvpPath = path.join(__dirname, 'sim.vvp');
 
-    // Remove old VCD if it exists
-    if (fs.existsSync(vcdPath)) fs.unlinkSync(vcdPath);
-
-    // 2. Write the code from the editor to files
     fs.writeFileSync(designPath, design);
     fs.writeFileSync(tbPath, testbench);
 
-    // 3. Compile and Run using Icarus Verilog
     const cmd = `iverilog -o "${vvpPath}" "${designPath}" "${tbPath}" && vvp "${vvpPath}"`;
-
+    
     exec(cmd, { timeout: 5000 }, (error, stdout, stderr) => {
         let log = stdout + (stderr || "");
         let vcdData = null;
 
-        if (error && error.killed) {
-            log += "\n[SYSTEM ERROR]: Simulation timed out. Check for infinite loops or missing $finish.";
-        }
+        // 3. AUTO-DETECT: Find any VCD file that was generated
+        const updatedFiles = fs.readdirSync(__dirname);
+        const generatedVcd = updatedFiles.find(f => f.endsWith('.vcd'));
 
-        if (fs.existsSync(vcdPath)) {
-            vcdData = fs.readFileSync(vcdPath, 'utf8');
+        if (generatedVcd) {
+            vcdData = fs.readFileSync(path.join(__dirname, generatedVcd), 'utf8');
+            log += `\n[SERVER]: Detected and loaded ${generatedVcd}`;
         }
 
         res.json({ log: log, vcd: vcdData });
     });
 });
 
-// ✅ listen ONLY ONCE, at the very end
-app.listen(PORT, () => {
-    console.log(`Server running on ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server running on ${PORT}`));
