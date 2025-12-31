@@ -1,58 +1,82 @@
-const express = require('express');
-const { exec, execSync } = require('child_process');
-const fs = require('fs');
-const path = require('path');
+const express = require("express");
+const { spawn, execSync } = require("child_process");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
 const cors = require("cors");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.json({ limit: "200kb" })); // soft safety
 app.use(cors());
 
-app.post('/run', (req, res) => {
+app.post("/run", (req, res) => {
     const { design, testbench } = req.body;
 
-    // 1. Kill previous hanging processes
-    try {
-        if (process.platform === "win32") {
-            execSync('taskkill /F /IM vvp.exe /T 2>NUL || exit 0');
-        } else {
-            execSync('killall -9 vvp 2>/dev/null || true');
-        }
-    } catch (e) {}
+    // ---- STEP 1A: Create isolated temp directory ----
+    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "hdl-"));
 
-    // 2. Clean up ALL old VCD files in the directory
-    const files = fs.readdirSync(__dirname);
-    files.forEach(file => {
-        if (file.endsWith('.vcd')) fs.unlinkSync(path.join(__dirname, file));
-    });
-
-    const designPath = path.join(__dirname, 'design.v');
-    const tbPath = path.join(__dirname, 'testbench.v');
-    const vvpPath = path.join(__dirname, 'sim.vvp');
+    const designPath = path.join(workDir, "design.v");
+    const tbPath = path.join(workDir, "testbench.v");
+    const vvpPath = path.join(workDir, "sim.vvp");
 
     fs.writeFileSync(designPath, design);
     fs.writeFileSync(tbPath, testbench);
 
-    const cmd = `iverilog -o "${vvpPath}" "${designPath}" "${tbPath}" && vvp "${vvpPath}"`;
-    
-    exec(cmd, { timeout: 5000 }, (error, stdout, stderr) => {
-        let log = stdout + (stderr || "");
-        let vcdData = null;
+    let log = "";
+    let vcdData = null;
 
-        // 3. AUTO-DETECT: Find any VCD file that was generated
-        const updatedFiles = fs.readdirSync(__dirname);
-        const generatedVcd = updatedFiles.find(f => f.endsWith('.vcd'));
+    // ---- STEP 1B: Compile safely (NO shell) ----
+    const compile = spawn("iverilog", [
+        "-o",
+        vvpPath,
+        designPath,
+        tbPath
+    ]);
 
-        if (generatedVcd) {
-            vcdData = fs.readFileSync(path.join(__dirname, generatedVcd), 'utf8');
-            log += `\n[SERVER]: Detected and loaded ${generatedVcd}`;
+    compile.stdout.on("data", d => log += d.toString());
+    compile.stderr.on("data", d => log += d.toString());
+
+    compile.on("close", code => {
+        if (code !== 0) {
+            cleanup();
+            return res.json({ log, vcd: null });
         }
 
-        res.json({ log: log, vcd: vcdData });
+        // ---- STEP 1C: Run simulation safely ----
+        const run = spawn("vvp", [vvpPath], {
+            cwd: workDir,
+            timeout: 5000
+        });
+
+        run.stdout.on("data", d => log += d.toString());
+        run.stderr.on("data", d => log += d.toString());
+
+        run.on("close", () => {
+            // ---- STEP 1D: Find generated VCD ----
+            const files = fs.readdirSync(workDir);
+            const vcdFile = files.find(f => f.endsWith(".vcd"));
+
+            if (vcdFile) {
+                vcdData = fs.readFileSync(
+                    path.join(workDir, vcdFile),
+                    "utf8"
+                );
+                log += `\n[SERVER]: Loaded ${vcdFile}`;
+            }
+
+            cleanup();
+            res.json({ log, vcd: vcdData });
+        });
     });
+
+    // ---- Cleanup helper ----
+    function cleanup() {
+        fs.rmSync(workDir, { recursive: true, force: true });
+    }
 });
 
-app.listen(PORT, () => console.log(`Server running on ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`Server running on ${PORT}`);
+});
